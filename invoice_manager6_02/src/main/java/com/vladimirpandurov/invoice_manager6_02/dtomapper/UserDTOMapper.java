@@ -1,5 +1,6 @@
 package com.vladimirpandurov.invoice_manager6_02.dtomapper;
 
+import com.vladimirpandurov.invoice_manager6_02.domain.Role;
 import com.vladimirpandurov.invoice_manager6_02.domain.User;
 import com.vladimirpandurov.invoice_manager6_02.dto.UserDTO;
 import org.springframework.beans.BeanUtils;
@@ -11,6 +12,14 @@ public class UserDTOMapper {
     public static UserDTO fromUser(User user){
         UserDTO userDTO = new UserDTO();
         BeanUtils.copyProperties(user, userDTO);
+        return userDTO;
+    }
+
+    public static UserDTO fromUser(User user, Role role){
+        UserDTO userDTO = new UserDTO();
+        BeanUtils.copyProperties(user, userDTO);
+        userDTO.setRole(role.getName());
+        userDTO.setPermission(role.getPermission());
         return userDTO;
     }
 
