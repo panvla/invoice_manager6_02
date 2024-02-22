@@ -23,6 +23,6 @@ public class UserDTO {
     private boolean isNotLocked;
     private boolean isUsingMfa;
     private LocalDateTime createdAt;
-    private String role;
+    private String roleName;
     private String permission;
 }

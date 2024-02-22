@@ -1,34 +1,44 @@
 package com.vladimirpandurov.invoice_manager6_02.repository.implementation;
 
 import com.vladimirpandurov.invoice_manager6_02.domain.User;
+import com.vladimirpandurov.invoice_manager6_02.domain.UserPrincipal;
+import com.vladimirpandurov.invoice_manager6_02.dto.UserDTO;
+import com.vladimirpandurov.invoice_manager6_02.enumeration.VerificationType;
 import com.vladimirpandurov.invoice_manager6_02.exception.ApiException;
 import com.vladimirpandurov.invoice_manager6_02.repository.RoleRepository;
 import com.vladimirpandurov.invoice_manager6_02.repository.UserRepository;
+import com.vladimirpandurov.invoice_manager6_02.rowmapper.UserRowMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.jdbc.core.namedparam.SqlParameterSource;
 import org.springframework.jdbc.support.GeneratedKeyHolder;
 import org.springframework.jdbc.support.KeyHolder;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.core.userdetails.UsernameNotFoundException;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.stereotype.Repository;
 import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 
-import java.util.Collection;
-import java.util.Map;
-import java.util.Objects;
-import java.util.UUID;
+import java.util.*;
 
 import static com.vladimirpandurov.invoice_manager6_02.enumeration.RoleType.ROLE_USER;
 import static com.vladimirpandurov.invoice_manager6_02.enumeration.VerificationType.ACCOUNT;
+import static com.vladimirpandurov.invoice_manager6_02.enumeration.VerificationType.PASSWORD;
 import static com.vladimirpandurov.invoice_manager6_02.query.UserQuery.*;
+import static org.apache.commons.lang3.RandomStringUtils.randomAlphabetic;
+import static org.apache.commons.lang3.time.DateFormatUtils.format;
+import static org.apache.commons.lang3.time.DateUtils.addDays;
 
 @Repository
 @RequiredArgsConstructor
 @Slf4j
-public class UserRepositoryImpl implements UserRepository<User> {
+public class UserRepositoryImpl implements UserRepository<User>, UserDetailsService {
 
+    private static final String DATA_FORMAT = "yyyy-MM-dd hh:mm:ss";
     private final NamedParameterJdbcTemplate jdbc;
     private final RoleRepository roleRepository;
     private final BCryptPasswordEncoder encoder;
@@ -73,6 +83,128 @@ public class UserRepositoryImpl implements UserRepository<User> {
         return null;
     }
 
+    @Override
+    public User getUserByEmail(String email) {
+        try{
+            User user = jdbc.queryForObject(SELECT_USER_BY_EMAIL_QUERY, Map.of("email", email), new UserRowMapper());
+            return user;
+        }catch (EmptyResultDataAccessException exception){
+            log.error("No user found by email");
+            throw new ApiException("No user found by email: " + email);
+        }catch (Exception exception){
+            log.error(exception.getMessage());
+            throw new ApiException("An error occurred. Please try again.");
+        }
+    }
+
+    @Override
+    public void sendVerificationCode(UserDTO userDTO) {
+        String expirationDate = format(addDays(new Date(), 1), DATA_FORMAT);
+        String verificationCode = randomAlphabetic(8).toUpperCase();
+        try{
+            jdbc.update(DELETE_VERIFICATION_CODE_BY_USER_ID, Map.of("id", userDTO.getId()));
+            jdbc.update(INSERT_VERIFICATION_CODE_QUERY, Map.of("user_id", userDTO.getId(), "code", verificationCode, "expirationDate", expirationDate));
+            //sendSms(user.getPhone())
+            log.info("Verification CODE: {}", verificationCode);
+        }catch (Exception exception){
+            log.error(exception.getMessage());
+            throw new ApiException("An error occurred. Please try again.");
+        }
+    }
+
+    @Override
+    public User verifyCode(String email, String code) {
+        if(isVerificationCodeExpired(code)) throw new ApiException("This code has expired. Please login again.");
+        try{
+            User userByCode = jdbc.queryForObject(SELECT_USER_BY_USER_CODE_QUERY, Map.of("code", code), new UserRowMapper());
+            User userByEmail = jdbc.queryForObject(SELECT_USER_BY_EMAIL_QUERY, Map.of("email", email), new UserRowMapper());
+            if(userByCode.getEmail().equalsIgnoreCase(userByEmail.getEmail())){
+                jdbc.update(DELETE_CODE_BY_CODE, Map.of("code", code));
+                return userByCode;
+            }else {
+                throw new ApiException("Code is invalid. Please try again");
+            }
+        }catch (EmptyResultDataAccessException exception){
+            throw new ApiException("Unable to find record");
+        }catch (Exception exception){
+            throw new ApiException("An error occurred. Please try again.");
+        }
+    }
+
+    @Override
+    public void resetPassword(String email) {
+        if(getEmailCount(email.trim().toLowerCase()) <= 0) throw new ApiException("There is no account for this email address.");
+        try{
+            String expirationDate = format(addDays(new Date(), 1), DATA_FORMAT);
+            User user = getUserByEmail(email);
+            String verificationUrl = getVerificationUrl(UUID.randomUUID().toString(), PASSWORD.getType());
+            jdbc.update(DELETE_PASSWORD_VERIFICATION_BY_USER_ID_QUERY, Map.of("user_id", user.getId()));
+            jdbc.update(INSERT_PASSWORD_VERIFICATION_QUERY, Map.of("user_id", user.getId(), "url", verificationUrl, "expiration_data", expirationDate));
+            //sendEmail
+            log.info("Verification URL: {} ", verificationUrl);
+        }catch (Exception exception){
+            throw new ApiException("An error occurred. Please try again");
+        }
+    }
+
+    @Override
+    public User verifyPasswordKey(String key) {
+        if(isLinkExpired(key, PASSWORD)) throw new ApiException("This link has expired. Please reset your password again.");
+        try{
+            User user = jdbc.queryForObject(SELECT_USER_BY_PASSWORD_URL_QUERY, Map.of("url", getVerificationUrl(key, PASSWORD.getType())), new UserRowMapper());
+            return user;
+        }catch (EmptyResultDataAccessException exception){
+            throw new ApiException("This link is not valid. Please reset your password again");
+        }catch (Exception exception){
+            throw new ApiException("An error occurred. Please try again.");
+        }
+    }
+
+    @Override
+    public void renewPassword(String key, String password, String confirmPassword) {
+        if(!password.equals(confirmPassword)) throw new ApiException("Password don't match. Please try again.");
+        try{
+            jdbc.update(UPDATE_USER_PASSWORD_BY_URL_QUERY, Map.of("password", encoder.encode(password), "url", getVerificationUrl(key, PASSWORD.getType())));
+            jdbc.update(DELETE_VERIFICATION_BY_URL_QUERY, Map.of("url", getVerificationUrl(key, PASSWORD.getType())));
+        }catch (Exception exception){
+            throw new ApiException("An error occurred. Please try again");
+        }
+    }
+
+    @Override
+    public User verifyAccountKey(String key) {
+        try{
+            User user = jdbc.queryForObject(SELECT_USER_BY_ACCOUNT_URL_QUERY, Map.of("url", getVerificationUrl(key, ACCOUNT.getType())), new UserRowMapper());
+            jdbc.update(UPDATE_USER_ENABLED_QUERY, Map.of("enabled", true, "id", user.getId()));
+            return user;
+        }catch (EmptyResultDataAccessException exception){
+            throw new ApiException("This link is not valid");
+        }catch (Exception exception){
+            log.error(exception.getMessage());
+            throw new ApiException("An error occurred. Please try again.");
+        }
+    }
+
+    private Boolean isVerificationCodeExpired(String code){
+        try{
+            return jdbc.queryForObject(SELECT_CODE_EXPIRATION_QUERY, Map.of("code", code), Boolean.class);
+        }catch (EmptyResultDataAccessException exception){
+            throw new ApiException("This code is not valid. Please login again.");
+        }catch (Exception exception){
+            throw new ApiException("An error occurred. Please try again.");
+        }
+    }
+
+    private Boolean isLinkExpired(String key, VerificationType password){
+        try{
+            return jdbc.queryForObject(SELECT_EXPIRATION_BY_URL, Map.of("url", getVerificationUrl(key, password.getType())), Boolean.class);
+        }catch (EmptyResultDataAccessException exception){
+            throw new ApiException("This is not valid. Please reset your password again.");
+        }catch (Exception exception){
+            throw new ApiException("An error occurred. Please try again.");
+        }
+    }
+
     private Integer getEmailCount(String email){
         return jdbc.queryForObject(COUNT_USER_EMAIL_QUERY, Map.of("email", email), Integer.class);
     }
@@ -90,4 +222,15 @@ public class UserRepositoryImpl implements UserRepository<User> {
     }
 
 
+    @Override
+    public UserDetails loadUserByUsername(String email) throws UsernameNotFoundException {
+        User user = getUserByEmail(email);
+        if(user == null){
+            log.error("User not found in the database");
+            throw new UsernameNotFoundException("User not found in the database");
+        }else{
+            UserPrincipal userPrincipal = new UserPrincipal(user, this.roleRepository.getRoleByUserId(user.getId()));
+            return userPrincipal;
+        }
+    }
 }

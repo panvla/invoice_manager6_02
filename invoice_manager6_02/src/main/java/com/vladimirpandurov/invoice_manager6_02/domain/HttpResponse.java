@@ -13,7 +13,7 @@ import java.util.Map;
 public class HttpResponse {
     protected String timeStamp;
     protected int statusCode;
-    protected HttpStatus httpStatus;
+    protected HttpStatus status;
     protected String reason;
     protected String message;
     protected String developerMessage;
